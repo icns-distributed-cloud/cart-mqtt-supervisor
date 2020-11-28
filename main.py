@@ -12,10 +12,19 @@ SERIAL_BAUDRATE = 115200
 SERIAL_TIMEOUT = 100
 MQTT_HOST = 'localhost'
 MQTT_PORT = 1883
+SUB_TOPICS = [
+    ('/beverage/location', 1),
+    ('/room', 1),
+    ('/qr', 1),
+    ('/supervisor', 2)
+]
 
-DESTINATION = '427'
+# Global Variables
+destination = '427'
+start_label = '000'
 sclient = None
 logger = init_logger()
+location_status = 'STARTING_POINT' # STARTING_POINT / DESTINATION
 
 def init_logger():
     '''
@@ -37,48 +46,82 @@ def on_connect(client, userdata, flags, rc):
         logger.info('MQTT Connection Failed!')
         
 def on_message(client, userdata, msg):
-        data = json.loads(msg.payload.decode("utf-8"))
-        
-        code: int
-        if msg.topic == '/beverage/location':
-            code = handle_beverage(loc=data['location'], error_padding=5)
-        elif msg.topic == '/room':
-            code = handle_room(label=data['label'])
-        elif msg.topic == '/qr':
-            code = handle_qr()
-        else:
+    global location_status
+
+    # Decoding message
+    data = json.loads(msg.payload.decode('utf-8'))
+    logger.info('Message arrived : {}'.format(msg.payload.decode('utf-8')))
+    
+    # Get code which will be sent to STM board.
+    code: int
+    if msg.topic == '/beverage/location':
+        code = handle_beverage(loc=data['location'], error_padding=5)
+    elif msg.topic == '/room':
+        code = handle_room(label=data['label'])
+    elif msg.topic == '/qr':
+        code = handle_qr()
+    elif msg.topic == '/supervisor':
+        handle_supervisor(payload=data)
+    else:
+        return
+
+    # Preprocessing
+    if code == '3':
+        client.unsubscribe('/beverage/location')
+        logger.info('MQTT unsubscribed topic "/beverage/location".')
+    elif code == '5':
+        if location_status == 'DESTINATION':
             return
-        logger.info('code:', code)
-        
-        if code == 3:
-            client.unsubscribe('/beverage/location')
-            logger.info('MQTT unsubscribed topic "/beverage/location".')
-        elif code == 4:
-            client.unsubscribe('/room')
-            logger.info('MQTT unsubscribed topic "/room".')
+        location_status = 'DESTINATION'
+    elif code == '6':
+        if location_status == 'STARTING_POINT':
+            return
+        location_status = 'STARTING_POINT'
+
+    # Send code to STM board.
+    sclient.write(serial.to_bytes([int(code, 16)]))
+    logger.info('Code {} sent.'.format(code))
         
 def handle_beverage(loc, center=320, error_padding=5):
     x_range = (center - error_padding, center + error_padding)
-    code = 0
+    code = '0'
     if loc < x_range[0]:
-        sclient.write(serial.to_bytes([0x01]))
-        code = 1
+        code = '1'
     elif loc > x_range[1]:
-        sclient.write(serial.to_bytes([0x02]))
-        code = 2
+        code = '2'
     else:
-        sclient.write(serial.to_bytes([0x03]))
-        code = 3
+        code = '3'
     return code
         
 def handle_room(label):
-    if label == DESTINATION:
-        sclient.write(serial.to_bytes([0x04]))
-        return 4
+    if label == destination:
+        logger.info('Arrived at the destination {} !'.format(destination))
+        return '5'
+    elif label == start_label:
+        logger.info('Arrived at the Starting Point!')
+        return '6'
         
 def handle_qr():
-    sclient.write(serial.to_bytes([0x05]))
-    return 5
+    logger.info('QR Code detected!')
+    return '4'
+
+def handle_supervisor(payload):
+    global destination
+
+    try:
+        if payload['command'] == 'order':
+            destination = payload['msg']['destination']
+        elif payload['command'] == 'restart':
+            pass
+        else:
+            logger.info('Invalid /supervisor command : {}'.format(payload['command']))
+    except KeyError:
+        logger.info('Invalid /supervisor message.')
+
+def restart():
+    logger.info('Restarting...')
+    for it in SUB_TOPICS:
+        client.subscribe(it[0], it[1])
 
 if __name__ == '__main__':
     # Serial Connection
@@ -93,10 +136,8 @@ if __name__ == '__main__':
     client.connect(MQTT_HOST, MQTT_PORT)
 
     # MQTT Loop
-    client.subscribe('/beverage/location', 1)
-    client.subscribe('/room', 1)
-    client.subscribe('/qr', 1)
-    client.subscribe('/supervisor', 2)
+    for topic in SUB_TOPICS:
+        client.subscribe(topic[0], topic[1])
     try:
         client.loop_forever()
     except KeyboardInterrupt:
