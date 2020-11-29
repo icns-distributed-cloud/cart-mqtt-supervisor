@@ -20,11 +20,12 @@ SUB_TOPICS = [
 ]
 
 # Global Variables
-destination = '427'
-start_label = '000'
+destination = '324'
+start_label = '326'
 sclient = None
-logger = init_logger()
 location_status = 'STARTING_POINT' # STARTING_POINT / DESTINATION
+qr_sent = False
+middle_sent = False
 
 def init_logger():
     '''
@@ -39,6 +40,8 @@ def init_logger():
     _logger.addHandler(stream_handler)
     return _logger
 
+logger = init_logger()
+
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
         logger.info('MQTT Connected Successfully (to {}:{})'.format(MQTT_HOST, MQTT_PORT))
@@ -46,14 +49,14 @@ def on_connect(client, userdata, flags, rc):
         logger.info('MQTT Connection Failed!')
         
 def on_message(client, userdata, msg):
-    global location_status
+    global location_status, qr_sent
 
     # Decoding message
     data = json.loads(msg.payload.decode('utf-8'))
     logger.info('Message arrived : {}'.format(msg.payload.decode('utf-8')))
     
     # Get code which will be sent to STM board.
-    code: int
+    code = '0'
     if msg.topic == '/beverage/location':
         code = handle_beverage(loc=data['location'], error_padding=5)
     elif msg.topic == '/room':
@@ -62,6 +65,7 @@ def on_message(client, userdata, msg):
         code = handle_qr()
     elif msg.topic == '/supervisor':
         handle_supervisor(payload=data)
+        code = '0'
     else:
         return
 
@@ -69,6 +73,10 @@ def on_message(client, userdata, msg):
     if code == '3':
         client.unsubscribe('/beverage/location')
         logger.info('MQTT unsubscribed topic "/beverage/location".')
+    elif code == '4':
+        if qr_sent:
+            return
+        qr_sent = True
     elif code == '5':
         if location_status == 'DESTINATION':
             return
@@ -79,8 +87,9 @@ def on_message(client, userdata, msg):
         location_status = 'STARTING_POINT'
 
     # Send code to STM board.
-    sclient.write(serial.to_bytes([int(code, 16)]))
-    logger.info('Code {} sent.'.format(code))
+    if code != '0':
+        sclient.write(serial.to_bytes([int(code, 16)]))
+        logger.info('Code {} sent.'.format(code))
         
 def handle_beverage(loc, center=320, error_padding=5):
     x_range = (center - error_padding, center + error_padding)
@@ -100,6 +109,8 @@ def handle_room(label):
     elif label == start_label:
         logger.info('Arrived at the Starting Point!')
         return '6'
+    else
+        return '0'
         
 def handle_qr():
     logger.info('QR Code detected!')
@@ -110,9 +121,12 @@ def handle_supervisor(payload):
 
     try:
         if payload['command'] == 'order':
-            destination = payload['msg']['destination']
+            destination = payload['msg']['room']
+            bev = payload['msg']['beverage']
+            client.publish('/beverage/order', json.dumps({'beverage':bev}), 2)
+            logger.info('Sent /beverage/order')
         elif payload['command'] == 'restart':
-            pass
+            restart()
         else:
             logger.info('Invalid /supervisor command : {}'.format(payload['command']))
     except KeyError:
