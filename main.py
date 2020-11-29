@@ -109,7 +109,7 @@ def handle_room(label):
     elif label == start_label:
         logger.info('Arrived at the Starting Point!')
         return '6'
-    else
+    else:
         return '0'
         
 def handle_qr():
