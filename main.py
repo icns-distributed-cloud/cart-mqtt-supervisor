@@ -119,9 +119,12 @@ def handle_supervisor(payload):
         logger.info('Invalid /supervisor message.')
 
 def restart():
+    global location_status
     logger.info('Restarting...')
     for it in SUB_TOPICS:
         client.subscribe(it[0], it[1])
+    location_status = 'STARTING_POINT'
+    logger.info('Restarting process completed!')
 
 if __name__ == '__main__':
     # Serial Connection
